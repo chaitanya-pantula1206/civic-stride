@@ -46,7 +46,7 @@ Benchmark your region's spatial performance against standard municipal benchmark
 
 ## 📂 Repository Structure
 
-civic-stride/
+<pre><code>civic-stride/
 ├── backend/
 │   └── app/
 │       ├── analytics/
@@ -61,14 +61,12 @@ civic-stride/
 │   ├── context/                      # Workspace and authentication providers
 │   ├── pages/                        # Diagnostic report views (Climate, Infrastructure, Transit)
 │   ├── services/
-│       └── overpassService.ts        # Dynamic Overpass query builder & client
+│   │   └── overpassService.ts        # Dynamic Overpass query builder & client
 │   └── App.tsx
 ├── public/                           # Static assets, SVG icons, manifests
 └── docs/
-    └── screenshots/                  # Platform preview captures
-
----
-
+    └── screenshots/                  # Platform preview captures</code></pre>
+    
 ## 🚀 Getting Started
 
 ### Prerequisites
