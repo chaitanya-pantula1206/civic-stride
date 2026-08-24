@@ -15,7 +15,7 @@ export default function DashboardFrame({
   onQueryStateChange,
   onQueryComplete,
 }: DashboardFrameProps) {
-  const { mapParams, setMapParams } = useContext(WorkspaceContext);
+  const { mapParams, setMapParams, setOsmData } = useContext(WorkspaceContext);
 
   // Initialize coordinates states using cached parameters if they exist
   const [minLat, setMinLat] = useState<string>(() => mapParams?.minLat || '37.7800');
@@ -159,6 +159,7 @@ export default function DashboardFrame({
 
     try {
       const response = await OverpassService.fetchOSMGeoJSON(s, w, n, e);
+      setOsmData(response);
       setTotalElementsFound(response.geoJSON.features.length);
       onQueryComplete(response.densityData, response.geoJSON.features.length);
 

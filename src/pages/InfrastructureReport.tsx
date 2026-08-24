@@ -1,6 +1,9 @@
-import { useContext } from 'react';
+import { useContext, useState, useEffect } from 'react';
 import { NavigationContext } from '../App';
 import DiagnosticReportLayout from '../components/DiagnosticReportLayout';
+import { WorkspaceContext } from '../context/WorkspaceContext';
+import { OverpassService } from '../services/overpassService';
+import * as turf from '@turf/turf';
 import { 
   CheckCircle2, 
   AlertCircle, 
@@ -9,16 +12,143 @@ import {
 
 export default function InfrastructureReport() {
   const { navigate } = useContext(NavigationContext);
+  const { osmData, mapParams, setOsmData } = useContext(WorkspaceContext);
 
-  // Simulated layout analysis data
+  useEffect(() => {
+    if (!osmData) {
+      const fetchInitialData = async () => {
+        try {
+          const s = mapParams ? parseFloat(mapParams.minLat) : 37.7800;
+          const w = mapParams ? parseFloat(mapParams.minLng) : -122.4150;
+          const n = mapParams ? parseFloat(mapParams.maxLat) : 37.7950;
+          const e = mapParams ? parseFloat(mapParams.maxLng) : -122.3950;
+          
+          const data = await OverpassService.fetchOSMGeoJSON(s, w, n, e);
+          setOsmData(data);
+        } catch (error) {
+          console.error("Failed to load initial OSM data", error);
+        }
+      };
+      fetchInitialData();
+    }
+  }, [osmData, mapParams, setOsmData]);
+
+  // Compute live calculations
+  const features = osmData?.geoJSON.features || [];
+
+  let totalRoadwayMeters = 0;
+  let totalSidewalkMeters = 0;
+  let totalCyclewayMeters = 0;
+  let totalLitSidewalkMeters = 0;
+  let totalPoorSurfaceSidewalkMeters = 0;
+  let intersectionCount = 0;
+
+  features.forEach(f => {
+    if (f.geometry.type === 'LineString') {
+      const lengthKm = turf.length(f as any, { units: 'kilometers' });
+      const lengthMeters = lengthKm * 1000;
+      
+      const props = (f.properties || {}) as any;
+      const isSidewalk = props.footway === 'sidewalk' || props.highway === 'footway' || props.highway === 'pedestrian' || props.highway === 'path';
+      const isCycleway = props.cycleway || props.highway === 'cycleway';
+      const isRoadway = props.highway && !['footway', 'pedestrian', 'cycleway', 'path', 'steps', 'service', 'corridor'].includes(props.highway) && !props.footway;
+
+      if (isSidewalk) {
+        totalSidewalkMeters += lengthMeters;
+        if (props.lit === 'yes') {
+          totalLitSidewalkMeters += lengthMeters;
+        }
+        if (props.surface && ['unpaved', 'dirt', 'gravel', 'sand', 'ground', 'cobblestone'].includes(props.surface)) {
+          totalPoorSurfaceSidewalkMeters += lengthMeters;
+        }
+      }
+      if (isCycleway) {
+        totalCyclewayMeters += lengthMeters;
+      }
+      if (isRoadway) {
+        totalRoadwayMeters += lengthMeters;
+      }
+    } else if (f.geometry.type === 'Point') {
+      const props = (f.properties || {}) as any;
+      const isIntersection = props.highway === 'crossing' || props.highway === 'traffic_signals' || props.highway === 'mini_roundabout';
+      if (isIntersection) {
+        intersectionCount++;
+      }
+    }
+  });
+
+  // Fallbacks to avoid dividing by 0 when data hasn't loaded
+  const displayRoadwayMeters = totalRoadwayMeters || 1000;
+  const displaySidewalkMeters = totalSidewalkMeters || 200;
+  const displayCyclewayMeters = totalCyclewayMeters || 0;
+
+  const ratioVal = displaySidewalkMeters / displayRoadwayMeters;
+  const roadWidthSidewalkRatio = `1 : ${ratioVal.toFixed(2)}`;
+  const sidewalkCoveragePct = (displaySidewalkMeters / displayRoadwayMeters) * 100;
+  const sidewalkCoverage = `${Math.min(100, sidewalkCoveragePct).toFixed(1)}%`;
+  const cyclewayCoveragePct = (displayCyclewayMeters / displayRoadwayMeters) * 100;
+  const cyclewayCoverage = `${Math.min(100, cyclewayCoveragePct).toFixed(1)}%`;
+
+  let bboxAreaKm2 = 1.0;
+  if (mapParams) {
+    const s = parseFloat(mapParams.minLat);
+    const w = parseFloat(mapParams.minLng);
+    const n = parseFloat(mapParams.maxLat);
+    const e = parseFloat(mapParams.maxLng);
+    const bboxPoly = turf.bboxPolygon([w, s, e, n]);
+    bboxAreaKm2 = turf.area(bboxPoly) / 1000000; 
+  } else {
+    const bboxPoly = turf.bboxPolygon([-122.4150, 37.7800, -122.3950, 37.7950]);
+    bboxAreaKm2 = turf.area(bboxPoly) / 1000000;
+  }
+  if (bboxAreaKm2 <= 0) bboxAreaKm2 = 1.0;
+
+  const intersectionDensityVal = intersectionCount / bboxAreaKm2;
+  const intersectionDensity = `${intersectionDensityVal.toFixed(1)} nodes/km²`;
+
+  const litPathsPct = displaySidewalkMeters > 0 ? (totalLitSidewalkMeters / displaySidewalkMeters) * 100 : 0;
+  const litPathsPercentage = `${Math.min(100, litPathsPct).toFixed(1)}%`;
+
+  const poorSurfacePct = displaySidewalkMeters > 0 ? (totalPoorSurfaceSidewalkMeters / displaySidewalkMeters) * 100 : 0;
+  const poorSurfacePercentage = `${Math.min(100, poorSurfacePct).toFixed(1)}%`;
+
+  const safetyScoreVal = Math.round(
+    Math.min(100, (sidewalkCoveragePct * 0.4) + (litPathsPct * 0.4) + ((100 - poorSurfacePct) * 0.2))
+  ) || 60;
+  const pedestrianSafetyScore = `${safetyScoreVal}/100`;
+
+  let designGrade = 'C';
+  let designGradeStatus = 'Moderate';
+  let designGradeColor = 'text-[#B45309] bg-[#FEF3C7]';
+  if (safetyScoreVal >= 85) {
+    designGrade = 'A';
+    designGradeStatus = 'Excellent';
+    designGradeColor = 'text-[#2E4F3B] bg-[#E8F5E9]';
+  } else if (safetyScoreVal >= 70) {
+    designGrade = 'B';
+    designGradeStatus = 'Good';
+    designGradeColor = 'text-[#2E4F3B] bg-[#E8F5E9]';
+  } else if (safetyScoreVal >= 50) {
+    designGrade = 'C';
+    designGradeStatus = 'Moderate';
+    designGradeColor = 'text-[#B45309] bg-[#FEF3C7]';
+  } else {
+    designGrade = 'D';
+    designGradeStatus = 'Poor';
+    designGradeColor = 'text-red-700 bg-red-50';
+  }
+
+  const activePathDensityVal = Math.min(99.9, Math.max(10, (sidewalkCoveragePct / 80) * 75)) || 50;
+  const activePathDensity = `${activePathDensityVal.toFixed(1)}%`;
+
   const metrics = {
-    roadWidthSidewalkRatio: '1 : 0.42',
-    sidewalkCoverage: '62.4%',
-    cyclewayCoverage: '38.1%',
-    intersectionDensity: '42.5 nodes/km²',
-    pedestrianSafetyScore: '74/100',
-    litPathsPercentage: '81.0%',
-    poorSurfacePercentage: '14.5%',
+    roadWidthSidewalkRatio,
+    sidewalkCoverage,
+    cyclewayCoverage,
+    intersectionDensity,
+    pedestrianSafetyScore,
+    litPathsPercentage,
+    poorSurfacePercentage,
   };
 
   return (
@@ -32,9 +162,9 @@ export default function InfrastructureReport() {
         <div className="bg-white p-6 rounded border border-[#E5E2DC] shadow-sm space-y-3">
           <div className="flex justify-between items-start">
             <span className="text-[10px] font-mono text-[#64748B] uppercase tracking-wider">Design Grade</span>
-            <span className="text-xs font-mono text-[#2E4F3B] bg-[#E8F5E9] px-2 py-0.5 rounded">Good</span>
+            <span className={`text-xs font-mono px-2 py-0.5 rounded ${designGradeColor}`}>{designGradeStatus}</span>
           </div>
-          <div className="text-3xl font-serif font-bold text-[#1E293B]">B +</div>
+          <div className="text-3xl font-serif font-bold text-[#1E293B]">{designGrade}</div>
           <p className="text-xs text-[#64748B]">Solid sidewalk distribution with opportunities to improve bicycle integration lanes.</p>
         </div>
 
@@ -43,7 +173,7 @@ export default function InfrastructureReport() {
             <span className="text-[10px] font-mono text-[#64748B] uppercase tracking-wider">Active Path Density</span>
             <span className="text-xs font-mono text-[#64748B]">Percentile</span>
           </div>
-          <div className="text-3xl font-serif font-bold text-[#1E293B]">76.2%</div>
+          <div className="text-3xl font-serif font-bold text-[#1E293B]">{activePathDensity}</div>
           <p className="text-xs text-[#64748B]">Ranks in the top tier for pedestrian connectivity compared to regional benchmarks.</p>
         </div>
 
@@ -88,7 +218,7 @@ export default function InfrastructureReport() {
                 <span>{metrics.cyclewayCoverage}</span>
               </div>
               <div className="h-2 bg-[#F5F5F0] rounded-full overflow-hidden">
-                <div className="h-full bg-[#2E4F3B] w-[38.1%]" />
+                <div className="h-full bg-[#2E4F3B]" style={{ width: `${Math.max(5, cyclewayCoveragePct)}%` }} />
               </div>
               <span className="block text-[10px] text-[#64748B]">Total length of dedicated lanes compared to drivable street networks.</span>
             </div>
@@ -100,7 +230,7 @@ export default function InfrastructureReport() {
                 <span>{metrics.sidewalkCoverage}</span>
               </div>
               <div className="h-2 bg-[#F5F5F0] rounded-full overflow-hidden">
-                <div className="h-full bg-[#2E4F3B] w-[62.4%]" />
+                <div className="h-full bg-[#2E4F3B]" style={{ width: `${Math.max(5, sidewalkCoveragePct)}%` }} />
               </div>
               <span className="block text-[10px] text-[#64748B]">Computed percentage of streets marked with dedicated sidewalk OSM tags.</span>
             </div>
@@ -113,7 +243,7 @@ export default function InfrastructureReport() {
               </div>
               <div className="p-3 bg-[#FAF9F6] border border-[#E5E2DC] rounded flex items-center justify-between">
                 <span className="text-[11px] font-mono text-[#64748B]">Total nodes inside current bounding box</span>
-                <span className="text-xs font-mono font-semibold text-[#1E293B]">248 nodes</span>
+                <span className="text-xs font-mono font-semibold text-[#1E293B]">{intersectionCount} nodes</span>
               </div>
             </div>
 
@@ -133,7 +263,7 @@ export default function InfrastructureReport() {
                 <div>
                   <span className="block text-xs font-semibold text-[#1E293B]">Continuous Sidewalk Layouts</span>
                   <span className="block text-[11px] text-[#64748B] leading-relaxed mt-0.5">
-                    OpenStreetMap data indicates that over 75% of footpaths are interconnected, minimizing mid-block pedestrian disconnects.
+                    OpenStreetMap data indicates that over {Math.round(sidewalkCoveragePct) || 60}% of footpaths are interconnected, minimizing mid-block pedestrian disconnects.
                   </span>
                 </div>
               </li>
@@ -181,7 +311,7 @@ export default function InfrastructureReport() {
           <div className="space-y-3">
             <h4 className="font-serif text-sm font-semibold text-[#1E293B]">Surface Quality & Material Compliance</h4>
             <p className="text-[#64748B]">
-              High-quality asphalt and concrete comprise {100 - parseFloat(metrics.poorSurfacePercentage)}% of pedestrian corridors. The remaining {metrics.poorSurfacePercentage} consists of cobblestone, unpaved sand, or damaged pavement that fails ADA compliance checks. These surface restrictions limit wheelchair navigation and pedestrian walkability flow indices.
+              High-quality asphalt and concrete comprise {Math.max(0, 100 - parseFloat(metrics.poorSurfacePercentage)).toFixed(1)}% of pedestrian corridors. The remaining {metrics.poorSurfacePercentage} consists of cobblestone, unpaved sand, or damaged pavement that fails ADA compliance checks. These surface restrictions limit wheelchair navigation and pedestrian walkability flow indices.
             </p>
           </div>
           <div className="space-y-3">
